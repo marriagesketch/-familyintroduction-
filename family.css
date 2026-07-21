@@ -1,0 +1,35 @@
+/* ============================================================
+   家族紹介フォーム 追加スタイル
+   （カード入力まわりは style.css の自分史カードのクラスを流用）
+   ============================================================ */
+
+.family-intro-desc{ margin:0; font-size:13px; }
+
+.family-settings{ margin-top:22px; }
+
+/* ---- プレビュー ---- */
+.family-preview-list{ display:flex; flex-direction:column; gap:14px; }
+
+.family-preview-card{
+  background:#fff; border-radius:var(--radius-md);
+  box-shadow:var(--shadow-card); padding:16px 16px 14px;
+}
+
+.family-preview-heading{
+  display:flex; align-items:center; gap:10px; margin:0 0 10px;
+  font-size:15px; font-weight:800; color:#3a3a3a;
+}
+
+.family-relation-badge{
+  flex:0 0 auto; min-width:28px; height:28px; padding:0 8px;
+  border-radius:var(--radius-pill); background:var(--pink-primary);
+  color:#fff; font-size:12.5px; font-weight:800;
+  display:flex; align-items:center; justify-content:center;
+}
+
+.family-preview-empty{
+  background:#fff; border-radius:var(--radius-md); box-shadow:var(--shadow-card);
+  padding:32px 20px; text-align:center; color:var(--ink-soft); font-size:14px;
+}
+
+.family-preview-card .field-row-label{ flex:0 0 100px; }

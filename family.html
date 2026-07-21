@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<meta name="theme-color" content="#f48ca0"/>
+<title>家族紹介</title>
+<link rel="stylesheet" href="style.css"/>
+<link rel="stylesheet" href="family.css"/>
+</head>
+<body>
+
+<div id="app" class="app-shell container">
+
+  <header class="app-bar">
+    <span class="app-bar-title">家族紹介</span>
+    <span id="saveStatus" class="save-status">
+      <svg viewBox="0 0 24 24" class="save-status-icon"><path d="M7 18a4 4 0 0 1-.6-7.96A5 5 0 0 1 16 9.5a3.5 3.5 0 0 1 .5 6.98" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      下書き保存中
+    </span>
+  </header>
+
+  <div class="profile-card">
+    <p class="profile-card-label">家族紹介について</p>
+    <p class="field-hint family-intro-desc">
+      ご家族お一人おひとりについて、人柄が伝わるように紹介します。項目はすべて任意です。わかる範囲でご記入ください。
+    </p>
+  </div>
+
+  <!-- 入力／プレビュー 切替 -->
+  <div class="sub-switcher">
+    <button class="sub-switch-btn active" data-tab="input" type="button">入力</button>
+    <button class="sub-switch-btn" data-tab="preview" type="button">プレビュー</button>
+  </div>
+
+  <!-- 入力タブ -->
+  <div id="tab-input" class="tab-panel">
+    <p class="drag-hint">カード左上の「▲▼」ボタンで、並び順を入れ替えられます。</p>
+    <div id="familyList" class="card-list"></div>
+    <button id="addFamilyBtn" class="btn-add" type="button">＋ 家族を追加</button>
+  </div>
+
+  <!-- プレビュータブ -->
+  <div id="tab-preview" class="tab-panel hidden">
+    <div id="familyPreview"></div>
+  </div>
+
+  <div class="settings-panel family-settings">
+    <p class="settings-row-label">下書きについて</p>
+    <p class="settings-row-desc">入力・カード追加・カード削除・並び替えのたびに、この端末へ自動的に保存されます。</p>
+    <button id="resetFamilyBtn" class="btn-danger" type="button">入力内容をすべて削除する</button>
+  </div>
+
+</div>
+
+<!-- 家族カードテンプレート -->
+<template id="familyCardTemplate">
+  <div class="life-card family-card">
+    <div class="life-card-header">
+      <div class="move-buttons">
+        <button class="move-up" type="button" aria-label="上に移動">▲</button>
+        <button class="move-down" type="button" aria-label="下に移動">▼</button>
+      </div>
+      <select class="card-category family-relation"></select>
+      <button class="delete-card" type="button" aria-label="カードを削除">×</button>
+    </div>
+    <div class="card-body">
+
+      <div class="field other-relation-field hidden">
+        <label>続柄を入力</label>
+        <input type="text" class="family-relationName" placeholder="例：義父、いとこ など">
+      </div>
+
+      <div class="two-col">
+        <div class="field">
+          <label>生年月日</label>
+          <input type="date" class="family-birthdate">
+        </div>
+        <div class="field">
+          <label>年齢</label>
+          <div class="unit-input"><input type="number" inputmode="numeric" class="family-age" placeholder="55"><span>歳</span></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>出身</label>
+        <input type="text" class="family-hometown" placeholder="神奈川県横浜市">
+      </div>
+
+      <div class="two-col">
+        <div class="field">
+          <label>最終学歴</label>
+          <select class="family-education"></select>
+        </div>
+        <div class="field">
+          <label>学校名（学部・専攻）</label>
+          <input type="text" class="family-schoolName" placeholder="○○大学 △△学部□□学科">
+        </div>
+      </div>
+
+      <div class="field">
+        <label>現職</label>
+        <input type="text" class="family-currentJob" placeholder="会社員（営業職）、主婦（主夫）など">
+      </div>
+
+      <div class="field">
+        <label>職歴</label>
+        <textarea class="family-jobHistory" placeholder="これまでの主な経歴（転職・転勤・独立など）"></textarea>
+      </div>
+
+      <div class="field">
+        <label>性格</label>
+        <textarea class="family-personality" placeholder="明るく面倒見が良い、几帳面　など"></textarea>
+      </div>
+
+      <div class="field">
+        <label>趣味</label>
+        <textarea class="family-hobby" placeholder="ゴルフ、家庭菜園、旅行　など"></textarea>
+      </div>
+
+      <div class="field">
+        <label>好きな食べ物</label>
+        <input type="text" class="family-favoriteFood" placeholder="寿司、カレー　など">
+      </div>
+
+      <div class="field">
+        <label>話すタイプ</label>
+        <select class="family-talkType"></select>
+      </div>
+
+    </div>
+  </div>
+</template>
+
+<script src="family.js"></script>
+</body>
+</html>
