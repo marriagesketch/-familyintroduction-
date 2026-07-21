@@ -6,7 +6,7 @@
 
 const FAMILY_STORAGE_KEY = "family_intro_draft_v1";
 
-const RELATION_LIST = ["父","母","兄","姉","弟","妹","祖父","祖母","おじ","おば","その他"];
+const RELATION_LIST = ["父","母","兄","姉","弟","妹","祖父","祖母","その他"];
 
 const EDUCATION_LIST = [
   "中学校卒","高校卒","高専卒","専門学校卒","短期大学卒","大学卒","大学院卒","その他",
