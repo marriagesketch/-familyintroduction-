@@ -598,7 +598,7 @@ function switchTab(tab){
 /* ============================================================
    共有：シェアターゲットピッカー用 Flexメッセージ
    ============================================================ */
-const HEADER_IMAGE_URL = "https://marriagesketch.github.io/-selfintroduction-/image_message.jpg";
+const SHARETARGETPICKER_IMAGE_URL = "https://marriagesketch.github.io/-familyintroduction-/sharetargetpicker.jpg";
 
 function buildShareFlexMessage(name, shareURL){
   const nameLine = name ? `${name}さんのご家族紹介が届きました` : "ご家族紹介が届きました";
@@ -610,7 +610,7 @@ function buildShareFlexMessage(name, shareURL){
       type: "bubble",
       hero: {
         type: "image",
-        url: HEADER_IMAGE_URL,
+        url: SHARETARGETPICKER_IMAGE_URL,
         size: "full",
         aspectRatio: "3:2",
         aspectMode: "cover"
