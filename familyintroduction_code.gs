@@ -1,5 +1,5 @@
 /* ============================================================
-   婚活プロフィール（自分史＆喜怒哀楽＆スケジュール） – GAS バックエンド (Code.gs)
+   家族紹介 – GAS バックエンド (Code.gs)
    スプレッドシートID: 18EsNFzS77rYcL1jGiGJ-JtOCCcyDGO1dVh9FSCUJjg4
    ------------------------------------------------------------
    ・シート「sheet」のみ作成（Analyticsシートは作成しない）
@@ -47,8 +47,14 @@ var INTERNAL_SECRET    = PropertiesService.getScriptProperties().getProperty('IN
    ・ everPartnered: true（かつ active:false）→ 過去に交際していたが現在は
      パートナー不在（交際終了後など）。本人以外は誰にも見せない。
    ・ 両方 false → 従来通り「初回閲覧者固定」ロジックを使う
-   結果は120秒キャッシュし、Partners API不通時は「everPartnered:false」
-   として従来ロジックにフォールバックする（閲覧を過剰にブロックしないため）。 */
+   結果は900秒（15分）キャッシュし、Partners API不通時は「everPartnered:false」
+   として従来ロジックにフォールバックする（閲覧を過剰にブロックしないため）。
+   ※以前は120秒キャッシュだったため、閲覧のたびに別GASへの外部fetchが頻発し、
+     それがコールドスタート等と重なって体感速度を落とす主因になっていた。
+     交際ステータスはリアルタイム性がそこまで重要ではないため、キャッシュを
+     延ばして外部呼び出し頻度を大きく減らす。 */
+var PARTNER_STATUS_CACHE_SECONDS = 900;
+
 function getPartnerStatus(ownerHash) {
   var cache = CacheService.getScriptCache();
   var cacheKey = 'partner_' + ownerHash;
@@ -72,7 +78,7 @@ function getPartnerStatus(ownerHash) {
   } catch (err) {
     Logger.log('getPartnerStatus failed: ' + err);
   }
-  cache.put(cacheKey, JSON.stringify(result), 120);
+  cache.put(cacheKey, JSON.stringify(result), PARTNER_STATUS_CACHE_SECONDS);
   return result;
 }
 
@@ -168,15 +174,16 @@ function handleShare(body) {
     }
 
     // 新しい行を追加する（id未発見、または既存行が閲覧済みだったため新規発行）。
-    // 同じownerHashの「未閲覧」の古い行があれば削除して、未閲覧の行は
-    // 常に最大1つになるようにする。
-    removePreviousUnviewedRows(sheet, ownerHash);
-
+    // 同じownerHashの「未閲覧」の古い行があれば、その行をそのまま新しい
+    // 内容で上書きする（＝1回のsetValuesで完結。deleteRow+appendRowより
+    // 大幅に軽い）。無ければ新規行として追加する。未閲覧の行は常に
+    // 最大1つになる。
     var newId = rowIndex ? Utilities.getUuid() : id;
-    sheet.appendRow([
+    var newRow = [
       newId, cipherText, '', ownerHash, '', 'active', SCHEMA_VERSION,
       now, now, '', '', 0
-    ]);
+    ];
+    upsertUnviewedRow(sheet, ownerHash, newRow);
     return jsonResponse({ ok: true, id: newId });
   } finally {
     lock.releaseLock();
@@ -184,18 +191,29 @@ function handleShare(body) {
 }
 
 /* 同じ ownerHash の既存行のうち、まだ誰にも開かれていない
-   （VIEWER_HASH が空の）行だけを削除する。
-   すでに誰かが開いた行は履歴として残すため削除しない。 */
-function removePreviousUnviewedRows(sheet, ownerHash) {
+   （VIEWER_HASH が空の）行があれば、その行をそのまま上書きする。
+   該当行が無ければ新規行として追加する。
+   すでに誰かが開いた行は履歴として残すため対象にしない。
+   ※通常運用では該当行は0または1件のみのはず（複数残る場合は最初の
+     1件だけを上書きし、残りは履歴として残る）。 */
+function upsertUnviewedRow(sheet, ownerHash, rowValues) {
   var lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return;
-  var values = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, COL.VIEWER_HASH).getValues();
-  for (var i = values.length - 1; i >= 0; i--) {
-    var rowOwnerHash  = values[i][COL.OWNER_HASH - 1];
-    var rowViewerHash = values[i][COL.VIEWER_HASH - 1];
-    if (rowOwnerHash === ownerHash && !rowViewerHash) {
-      sheet.deleteRow(DATA_START_ROW + i);
+  var targetRow = null;
+  if (lastRow >= DATA_START_ROW) {
+    var values = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, COL.VIEWER_HASH).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var rowOwnerHash  = values[i][COL.OWNER_HASH - 1];
+      var rowViewerHash = values[i][COL.VIEWER_HASH - 1];
+      if (rowOwnerHash === ownerHash && !rowViewerHash) {
+        targetRow = DATA_START_ROW + i;
+        break;
+      }
     }
+  }
+  if (targetRow) {
+    sheet.getRange(targetRow, 1, 1, rowValues.length).setValues([rowValues]);
+  } else {
+    sheet.appendRow(rowValues);
   }
 }
 
