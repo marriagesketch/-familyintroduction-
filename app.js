@@ -1,7 +1,8 @@
 /* ============================================================
    家族紹介フォーム – app.js
    ------------------------------------------------------------
-   婚活プロフィール本体（app.js）のLIFF連携パターンを踏襲。
+   婚活プロフィール本体（selfintroduction/app.js）のUI・LIFF連携・
+   共有まわりの実装パターンを踏襲。
    共有リンクは「id（このデータ専用のランダムID）＋復号鍵
    （URLのフラグメント）」のみで構成される。内容は暗号化された
    うえで GAS 経由でスプレッドシートに保存され、復号鍵はサーバー
@@ -47,23 +48,43 @@ function escapeHTML(str){
     .replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
-function calcAgeFromBirthdate(birthdateStr){
-  if(!birthdateStr) return "";
-  const bd = new Date(birthdateStr);
-  if(isNaN(bd.getTime())) return "";
-  const today = new Date();
-  let age = today.getFullYear() - bd.getFullYear();
-  const m = today.getMonth() - bd.getMonth();
-  if(m < 0 || (m === 0 && today.getDate() < bd.getDate())) age--;
-  return age >= 0 ? String(age) : "";
+
+/* ------------------------------------------------------------
+   スクショ抑止用ウォーターマーク
+   ------------------------------------------------------------
+   スクリーンショットの撮影自体は検知・ブロックできないため、
+   「撮られても誰が・いつ見た画面かが写り込む」ようにし、
+   無断転載・拡散への心理的な抑止力として機能させる。
+   ------------------------------------------------------------ */
+function buildWatermarkSVG(lines){
+  const tileW = 240, tileH = 140;
+  const lineHeight = 16;
+  const startY = tileH / 2 - ((lines.length - 1) * lineHeight) / 2;
+
+  const textEls = lines.map((line, i) => {
+    const y = startY + i * lineHeight;
+    return `<text x="0" y="${y}" font-size="12" font-family="sans-serif" ` +
+           `fill="rgba(0,0,0,0.1)" transform="rotate(-28 ${tileW / 2} ${tileH / 2})">${escapeHTML(line)}</text>`;
+  }).join("");
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${tileW}" height="${tileH}">${textEls}</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
-function formatDateLabel(iso){
-  if(!iso) return "";
-  const d = new Date(iso);
-  if(isNaN(d.getTime())) return "";
-  return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}`;
+
+function showScreenshotWatermark(viewerHash){
+  const el = document.getElementById("screenshotWatermark");
+  if(!el) return;
+  const stamp = new Date().toLocaleString("ja-JP", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  });
+  const lines = [
+    "スクショ・転載禁止",
+    `${viewerHash.slice(0, 8)}  ${stamp}`,
+  ];
+  el.style.backgroundImage = `url("${buildWatermarkSVG(lines)}")`;
+  el.classList.add("show");
 }
-function getFormBaseURL(){ return location.href.split("?")[0].split("#")[0]; }
 
 /* ============================================================
    Base64URL 変換ユーティリティ（AES鍵・暗号文の符号化に使用）
@@ -211,8 +232,8 @@ function renderFamilyCard(data){
 }
 
 function collectFamilyCard(node){
-  const relSel = node.querySelector(".family-relation");
-  const eduSel = node.querySelector(".family-education");
+  const relSel  = node.querySelector(".family-relation");
+  const eduSel  = node.querySelector(".family-education");
   const talkSel = node.querySelector(".family-talkType");
   return createFamilyData({
     id: node.dataset.id,
@@ -254,7 +275,7 @@ function relationDisplay(data){
 }
 
 /* ============================================================
-   カード内イベント（削除・移動・生年月日→年齢）
+   カード内イベント（削除・移動・その他続柄表示切替）
    ============================================================ */
 function bindFamilyCardEvents(node){
   node.querySelector(".delete-card").addEventListener("click", ()=>{
@@ -262,9 +283,6 @@ function bindFamilyCardEvents(node){
     node.remove();
     refreshFamilyMoveButtons();
     saveDraft();
-    if(!document.getElementById("tab-preview").classList.contains("hidden")){
-      renderFamilyPreview();
-    }
   });
 
   node.querySelector(".move-up").addEventListener("click", ()=>{
@@ -284,13 +302,6 @@ function bindFamilyCardEvents(node){
     node.querySelector(".other-relation-field").classList.toggle("hidden", e.target.value !== "その他");
     saveDraft();
   });
-
-  node.querySelector(".family-birthdate").addEventListener("change", (e)=>{
-    const ageEl = node.querySelector(".family-age");
-    const calced = calcAgeFromBirthdate(e.target.value);
-    if(calced !== "") ageEl.value = calced;
-    saveDraft();
-  });
 }
 
 function addFamilyCard(data={}){
@@ -302,13 +313,8 @@ function addFamilyCard(data={}){
 }
 
 /* ============================================================
-   自動保存（下書き・この端末のみ）
+   下書き保存／復元
    ============================================================ */
-let saveTimer = null;
-function scheduleSaveDraft(){
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveDraft, 400);
-}
 function saveDraft(){
   try{
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -341,6 +347,7 @@ function collectShareData(){
     createdAt: createdAt || "",
   };
 }
+function getFormBaseURL(){ return location.href.split("?")[0].split("#")[0]; }
 
 /* ------------------------------------------------------------
    LINEユーザーIDの取得
@@ -359,6 +366,13 @@ function getLineUserId() {
 
 /* ============================================================
    共有の公開／更新（GAS連携）
+   ------------------------------------------------------------
+   ・端末に保存済みのid・鍵があれば使い回そうとする（＝同じ共有
+     リンクのまま中身だけ最新化される）。無ければ新規に発行する。
+   ・ただし、その保存済みリンクをすでに誰かが開いていた場合は、
+     サーバー側が新しいidを発行して返してくる。その場合はここで
+     新しいidを採用し、以後はそのidを使い回す（鍵は変えない）。
+   ・戻り値: 発行された共有URL
    ============================================================ */
 async function publishAndShare(shareName){
   if(!createdAt){ createdAt = new Date().toISOString(); saveDraft(); }
@@ -387,6 +401,8 @@ async function publishAndShare(shareName){
   });
 
   if(!resp.ok){
+    // GAS側(doPost)まで届く前にGoogleのゲートウェイ等で弾かれているケース。
+    // ここで実際のレスポンス本文をログに出しておくと原因特定に役立つ。
     const bodyText = await resp.text().catch(()=>"(本文を取得できませんでした)");
     console.error(`share request failed: HTTP ${resp.status} ${resp.statusText}`, bodyText);
     throw new Error(`http_${resp.status}`);
@@ -395,14 +411,17 @@ async function publishAndShare(shareName){
   const result = await resp.json();
   if(!result.ok) throw new Error(result.reason || "share_failed");
 
+  // サーバーが新しいidを発行した場合（＝保存済みリンクがすでに誰かに
+  // 開かれていたため新しい行になった場合）はそちらを採用する。
+  // 鍵は変更しない（同じ鍵をそのまま使い回す）。
   shareInfo = { id: result.id, key: shareInfo.key };
   saveShareInfo(shareInfo);
 
   const shareURL = `${getFormBaseURL()}?id=${shareInfo.id}#${shareInfo.key}`;
   const name = (shareName||"").trim();
   const previewMsg = name
-    ? `${name}さんのご家族紹介が届きました。\n見る→${shareURL}`
-    : `ご家族紹介が届きました。\n見る→${shareURL}`;
+    ? `${name}さんのご家族紹介が届きました。\n回答をみる→${shareURL}`
+    : `ご家族紹介が届きました。\n回答をみる→${shareURL}`;
 
   return { shareURL, previewMsg, flexMessage: buildShareFlexMessage(name, shareURL) };
 }
@@ -455,6 +474,8 @@ async function handleSharedView(id, keyBase64){
 
   if(!liff.isLoggedIn()){ liff.login(); return; }
 
+  // ここまで来ればリダイレクトは発生しないはずなので、一時保存していた
+  // 復元用の情報は不要になる（消し忘れて別のリンクに誤って使われるのを防ぐ）
   try{ sessionStorage.removeItem(SHARE_VIEW_PENDING_KEY); }catch(_){}
 
   let key;
@@ -497,6 +518,11 @@ async function handleSharedView(id, keyBase64){
         "閲覧できません",
         "このリンクは最初に開いた方専用です。転送されたリンクは、その方以外は閲覧できない仕組みになっています。"
       );
+    }else if(result.reason === "partner_locked"){
+      showPublicState(
+        "閲覧できません",
+        "このリンクは現在のお相手専用です。"
+      );
     }else if(result.reason === "revoked" || result.reason === "expired" || result.reason === "deleted"){
       showPublicState("リンクが無効です", "このリンクはすでに無効になっています。最新の共有リンクを送ってもらってください。");
     }else if(result.reason === "not_found"){
@@ -517,11 +543,27 @@ async function handleSharedView(id, keyBase64){
   }
 
   renderPublicView(data);
+  showScreenshotWatermark(viewerHash);
 }
 
 /* ============================================================
-   プレビュー／公開ビュー 共通の描画
+   表示用 HTML ビルダー
    ============================================================ */
+function decoFlourishSVG(){
+  return `<svg viewBox="0 0 160 28" xmlns="http://www.w3.org/2000/svg">
+    <path d="M6 14 C32 3,50 25,76 13 S122 1,154 14" fill="none" stroke="#f4b8c5" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="24" cy="9" r="2.6" fill="#f48ca0"/><circle cx="58" cy="19" r="2.6" fill="#f48ca0"/>
+    <circle cx="96" cy="8" r="2.6" fill="#f48ca0"/><circle cx="132" cy="18" r="2.6" fill="#f48ca0"/>
+  </svg>`;
+}
+
+function formatDateLabel(iso){
+  if(!iso) return "";
+  const d = new Date(iso);
+  if(isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}`;
+}
+
 function fieldRow(label, value){
   if(!value) return "";
   return `<div class="field-row"><span class="field-row-label">${escapeHTML(label)}</span><span class="field-row-value">${escapeHTML(value).replace(/\n/g,"<br>")}</span></div>`;
@@ -552,8 +594,37 @@ function buildFamilyListHTML(list){
   }).join("") + `</div>`;
 }
 
+/* ============================================================
+   プレビュー・公開ビュー 共通の描画
+   ============================================================ */
+function renderFamilyContent(container, list, opts={}){
+  const { showViewerCTA=false } = opts;
+  const dateLabel = formatDateLabel(createdAt||"");
+
+  container.innerHTML = `
+    <div class="family-view-header">
+      <div class="family-view-header-deco">${decoFlourishSVG()}</div>
+      <p class="family-view-title">家族紹介</p>
+      <p class="family-view-sub">FAMILY INTRODUCTION</p>
+      ${dateLabel ? `<p class="family-view-date">作成日：${escapeHTML(dateLabel)}</p>` : ""}
+    </div>
+    ${buildFamilyListHTML(list)}
+    ${showViewerCTA ? `
+    <div class="cta-card">
+      <p class="cta-title">あなたも家族紹介を作ってみませんか？</p>
+      <p class="cta-text">ご家族お一人おひとりの人柄を、まとめてお相手に届けられます。</p>
+      <button type="button" class="btn-primary cta-btn" id="ctaCreateBtn">私も作成する</button>
+    </div>` : ""}
+  `;
+
+  if(showViewerCTA){
+    const btn = container.querySelector("#ctaCreateBtn");
+    if(btn) btn.addEventListener("click", ()=>{ location.href = getFormBaseURL(); });
+  }
+}
+
 function renderFamilyPreview(){
-  document.getElementById("familyPreview").innerHTML = buildFamilyListHTML(collectAllFamilyData());
+  renderFamilyContent(document.getElementById("previewContent"), collectAllFamilyData(), { showViewerCTA:false });
 }
 
 function renderPublicView(shared){
@@ -561,34 +632,22 @@ function renderPublicView(shared){
   const pv = document.getElementById("publicView");
   pv.style.display = "block";
   createdAt = shared.createdAt || null;
-  const dateLabel = formatDateLabel(createdAt || "");
-
-  pv.innerHTML = `
-    <div class="family-view-header">
-      <p class="family-view-title">家族紹介</p>
-      <p class="family-view-sub">FAMILY INTRODUCTION</p>
-      ${dateLabel ? `<p class="family-view-date">作成日：${escapeHTML(dateLabel)}</p>` : ""}
-    </div>
-    ${buildFamilyListHTML(shared.list||[])}
-    <div class="cta-card">
-      <p class="cta-title">あなたも家族紹介を作ってみませんか？</p>
-      <p class="cta-text">ご家族お一人おひとりの人柄を、まとめてお相手に届けられます。</p>
-      <button type="button" class="btn-primary cta-btn" id="ctaCreateBtn">私も作成する</button>
-    </div>
-  `;
-
-  const btn = pv.querySelector("#ctaCreateBtn");
-  if(btn) btn.addEventListener("click", ()=>{ location.href = getFormBaseURL(); });
+  renderFamilyContent(pv, shared.list||[], { showViewerCTA:true });
 }
 
 /* ============================================================
    タブ切替
    ============================================================ */
 function switchTab(tab){
-  document.getElementById("tab-input").classList.toggle("hidden", tab !== "input");
-  document.getElementById("tab-preview").classList.toggle("hidden", tab !== "preview");
-  document.querySelectorAll(".sub-switch-btn").forEach(b=>b.classList.toggle("active", b.dataset.tab === tab));
-  document.getElementById("appBarTitle").textContent = tab === "preview" ? "プレビュー" : "家族紹介";
+  ["input","preview","settings"].forEach(t=>{
+    document.getElementById(`tab-${t}`).classList.toggle("hidden", t !== tab);
+  });
+  document.querySelectorAll(".nav-btn").forEach(btn=>{
+    btn.classList.toggle("active", btn.dataset.tab === tab);
+  });
+  const titles = { preview:"プレビュー", settings:"設定" };
+  document.getElementById("appBarTitle").textContent = titles[tab] || "家族紹介";
+
   if(tab === "preview"){
     if(!createdAt){ createdAt = new Date().toISOString(); saveDraft(); }
     renderFamilyPreview();
@@ -596,7 +655,89 @@ function switchTab(tab){
 }
 
 /* ============================================================
+   イベント登録
+   ============================================================ */
+function bindEvents(){
+  document.getElementById("addFamilyBtn").addEventListener("click", ()=>{
+    addFamilyCard();
+    saveDraft();
+  });
+
+  let saveTimer = null;
+  document.getElementById("tab-input").addEventListener("input", ()=>{
+    clearTimeout(saveTimer); saveTimer = setTimeout(saveDraft, 500);
+  });
+  document.getElementById("tab-input").addEventListener("change", ()=>{
+    clearTimeout(saveTimer); saveTimer = setTimeout(saveDraft, 500);
+  });
+
+  document.querySelectorAll(".nav-btn").forEach(btn=>{
+    btn.addEventListener("click", ()=>switchTab(btn.dataset.tab));
+  });
+  document.getElementById("backToInputBtn").addEventListener("click", ()=>switchTab("input"));
+
+  /* ----- 送信ボタン（プレビュー画面上部） ----- */
+  document.getElementById("sendBtn").addEventListener("click", ()=>{
+    const modal = document.getElementById("shareModal");
+    document.getElementById("shareName").value = "";
+    modal.classList.remove("hidden");
+    modal.classList.add("show");
+  });
+
+  /* ----- 共有モーダル：共有する ----- */
+  document.getElementById("shareBtn").addEventListener("click", async()=>{
+    const shareBtn = document.getElementById("shareBtn");
+    const shareName = document.getElementById("shareName").value;
+
+    shareBtn.disabled = true;
+    const originalLabel = shareBtn.textContent;
+    shareBtn.textContent = "送信中…";
+
+    try{
+      const { flexMessage, previewMsg, shareURL } = await publishAndShare(shareName);
+
+      const modal = document.getElementById("shareModal");
+      modal.classList.remove("show");
+      modal.classList.add("hidden");
+
+      const lineURL = `https://line.me/R/msg/text/?${encodeURIComponent(previewMsg)}`;
+      await shareToOthers(flexMessage, previewMsg, lineURL);
+    }catch(e){
+      console.error("share error", e);
+      alert("送信に失敗しました。通信環境を確認してもう一度お試しください。");
+    }finally{
+      shareBtn.disabled = false;
+      shareBtn.textContent = originalLabel;
+    }
+  });
+
+  /* ----- モーダル外クリックで閉じる ----- */
+  document.getElementById("shareModal").addEventListener("click", (e)=>{
+    if(e.target === e.currentTarget){
+      e.currentTarget.classList.remove("show");
+      e.currentTarget.classList.add("hidden");
+    }
+  });
+
+  document.getElementById("resetFamilyBtn").addEventListener("click", ()=>{
+    if(!confirm("入力内容を削除して最初から作成しますか？この操作は取り消せません。")) return;
+    try{ localStorage.removeItem(STORAGE_KEY); }catch(_){}
+    try{ localStorage.removeItem(SHARE_INFO_KEY); }catch(_){}
+    location.href = getFormBaseURL();
+  });
+}
+
+/* ============================================================
    共有：シェアターゲットピッカー用 Flexメッセージ
+   長い共有URLはボタン(uriアクション)の中に格納するため、
+   相手に見える本文には長いリンクが表示されない。
+   ※ uriアクションのURLは1000文字以内という制限があるため、
+     超える場合は liff.shareTargetPicker 側でエラーになり、
+     呼び出し元で従来のURLスキーム方式にフォールバックする。
+   ※ hero画像のURLは、LINEのサーバーから読み込める公開HTTPS URL
+     である必要がある（ローカルパスや相対パスは不可）。
+     画像は1MB以下を推奨。PNGの透過部分はそのまま送ると
+     反映されない場合があるため、白背景に合成したJPEGを使用する。
    ============================================================ */
 const SHARETARGETPICKER_IMAGE_URL = "https://marriagesketch.github.io/-familyintroduction-/sharetargetpicker.jpg";
 
@@ -637,7 +778,7 @@ function buildShareFlexMessage(name, shareURL){
             style: "primary",
             height: "sm",
             color: "#f48ca0",
-            action: { type: "uri", label: "内容をみる", uri: shareURL }
+            action: { type: "uri", label: "回答をみる", uri: shareURL }
           }
         ]
       }
@@ -647,6 +788,15 @@ function buildShareFlexMessage(name, shareURL){
 
 /* ------------------------------------------------------------
    共有先を選んで送信する
+   1. シェアターゲットピッカーが使える場合、まずFlexメッセージ
+      （カード形式）での送信を試みる
+   2. Flexが失敗した場合（URLが長すぎる等）は、同じ複数選択画面の
+      ままテキストメッセージとして再送信を試みる
+      （テキストメッセージにはFlexボタンのuriのような1000文字の
+      制限が無いため、Flexで失敗したケースでも通りやすい）
+   3. それでも失敗した場合、または端末がシェアターゲットピッカー
+      自体に対応していない場合は、従来のURLスキーム方式（送信先を
+      選択画面を開いてテキストメッセージを送る）にフォールバック
    ------------------------------------------------------------ */
 async function shareToOthers(flexMessage, textPreviewMsg, fallbackLineSchemeURL){
   if(liff.isApiAvailable("shareTargetPicker")){
@@ -692,74 +842,6 @@ async function checkFriendship(){
 }
 
 /* ============================================================
-   イベント登録
-   ============================================================ */
-function bindEvents(){
-  document.getElementById("addFamilyBtn").addEventListener("click", ()=>{
-    addFamilyCard();
-    saveDraft();
-  });
-
-  document.getElementById("tab-input").addEventListener("input", scheduleSaveDraft);
-  document.getElementById("tab-input").addEventListener("change", scheduleSaveDraft);
-
-  document.querySelectorAll(".sub-switch-btn").forEach(btn=>{
-    btn.addEventListener("click", ()=>switchTab(btn.dataset.tab));
-  });
-  document.getElementById("backToInputBtn").addEventListener("click", ()=>switchTab("input"));
-
-  document.getElementById("resetFamilyBtn").addEventListener("click", ()=>{
-    if(!confirm("入力内容をすべて削除しますか？この操作は取り消せません。")) return;
-    try{ localStorage.removeItem(STORAGE_KEY); }catch(_){}
-    try{ localStorage.removeItem(SHARE_INFO_KEY); }catch(_){}
-    location.href = getFormBaseURL();
-  });
-
-  /* ----- 送信ボタン（プレビュー画面上部） ----- */
-  document.getElementById("sendBtn").addEventListener("click", ()=>{
-    const modal = document.getElementById("shareModal");
-    document.getElementById("shareName").value = "";
-    modal.classList.remove("hidden");
-    modal.classList.add("show");
-  });
-
-  /* ----- 共有モーダル：共有する ----- */
-  document.getElementById("shareBtn").addEventListener("click", async()=>{
-    const shareBtn = document.getElementById("shareBtn");
-    const shareName = document.getElementById("shareName").value;
-
-    shareBtn.disabled = true;
-    const originalLabel = shareBtn.textContent;
-    shareBtn.textContent = "送信中…";
-
-    try{
-      const { flexMessage, previewMsg, shareURL } = await publishAndShare(shareName);
-
-      const modal = document.getElementById("shareModal");
-      modal.classList.remove("show");
-      modal.classList.add("hidden");
-
-      const lineURL = `https://line.me/R/msg/text/?${encodeURIComponent(previewMsg)}`;
-      await shareToOthers(flexMessage, previewMsg, lineURL);
-    }catch(e){
-      console.error("share error", e);
-      alert("送信に失敗しました。通信環境を確認してもう一度お試しください。");
-    }finally{
-      shareBtn.disabled = false;
-      shareBtn.textContent = originalLabel;
-    }
-  });
-
-  /* ----- モーダル外クリックで閉じる ----- */
-  document.getElementById("shareModal").addEventListener("click", (e)=>{
-    if(e.target === e.currentTarget){
-      e.currentTarget.classList.remove("show");
-      e.currentTarget.classList.add("hidden");
-    }
-  });
-}
-
-/* ============================================================
    メイン処理
    ============================================================ */
 (async()=>{
@@ -788,8 +870,12 @@ function bindEvents(){
 
   if(!liff.isLoggedIn()){ liff.login(); return; }
 
-  /* LIFF初期化・ログイン後に友だち確認（未追加ならダイアログで追加を促す） */
-  await checkFriendship();
+  /* LIFF初期化・ログイン後に友だち確認（未追加ならダイアログで追加を促す）
+     liff.getFriendship() / requestFriendship() はLINEサーバーへの通信を
+     伴うため、ここをawaitすると電波が悪い時に画面表示自体が止まって
+     しまう。必須の処理ではないので、裏側で実行させて画面構築は
+     先に進める（fire-and-forget）。 */
+  checkFriendship();
 
   const hadDraft = loadDraft();
 

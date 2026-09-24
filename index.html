@@ -13,12 +13,23 @@
 <!-- 公開ビュー（共有リンクで開いたとき） -->
 <div id="publicView" class="public-view container"></div>
 
+<!-- スクショ抑止ウォーターマーク（共有リンクの閲覧者にのみ表示） -->
+<div id="screenshotWatermark" aria-hidden="true"></div>
+
 <!-- アプリ本体 -->
 <div id="app" class="app-shell container">
 
   <!-- トップ画面 -->
   <section id="screen-top" class="screen screen-top">
     <div class="top-card">
+      <div class="top-deco" aria-hidden="true">
+        <svg viewBox="0 0 200 32" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6 18 C40 4,60 30,90 16 S150 2,194 18" fill="none" stroke="#f4b8c5" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="30" cy="11" r="3" fill="#f48ca0"/><circle cx="70" cy="23" r="3" fill="#f48ca0"/>
+          <circle cx="115" cy="9" r="3" fill="#f48ca0"/><circle cx="160" cy="22" r="3" fill="#f48ca0"/>
+        </svg>
+      </div>
+      <p class="top-eyebrow">ご家族の人柄を伝える</p>
       <h1 class="top-title">家族紹介</h1>
       <p class="top-desc">
         ご家族お一人おひとりについて、人柄が伝わるように紹介します。項目はすべて任意です。わかる範囲でご記入ください。<br>
@@ -41,21 +52,14 @@
       </span>
     </header>
 
-    <div class="profile-card">
-      <p class="profile-card-label">家族紹介について</p>
-      <p class="field-hint family-intro-desc">
-        ご家族お一人おひとりについて、人柄が伝わるように紹介します。項目はすべて任意です。わかる範囲でご記入ください。
-      </p>
-    </div>
-
-    <!-- 入力／プレビュー 切替 -->
-    <div class="sub-switcher">
-      <button class="sub-switch-btn active" data-tab="input" type="button">入力</button>
-      <button class="sub-switch-btn" data-tab="preview" type="button">プレビュー</button>
-    </div>
-
     <!-- 入力タブ -->
     <div id="tab-input" class="tab-panel">
+      <div class="profile-card">
+        <p class="profile-card-label">家族紹介について</p>
+        <p class="field-hint family-intro-desc">
+          ご家族お一人おひとりについて、人柄が伝わるように紹介します。項目はすべて任意です。わかる範囲でご記入ください。
+        </p>
+      </div>
       <p class="drag-hint">カード左上の「▲▼」ボタンで、並び順を入れ替えられます。</p>
       <div id="familyList" class="card-list"></div>
       <button id="addFamilyBtn" class="btn-add" type="button">＋ 家族を追加</button>
@@ -65,15 +69,32 @@
     <div id="tab-preview" class="tab-panel hidden">
       <button id="sendBtn" class="btn-primary btn-block" type="button">送信する</button>
       <button id="backToInputBtn" class="btn-ghost btn-block" type="button">入力に戻って編集する</button>
-      <div id="familyPreview"></div>
+      <div id="previewContent"></div>
     </div>
 
-    <div class="settings-panel family-settings">
-      <p class="settings-row-label">下書きについて</p>
-      <p class="settings-row-desc">入力・カード追加・カード削除・並び替えのたびに、この端末へ自動的に保存されます。</p>
-      <button id="resetFamilyBtn" class="btn-danger" type="button">入力内容をすべて削除する</button>
+    <!-- 設定タブ -->
+    <div id="tab-settings" class="tab-panel hidden">
+      <div class="settings-panel">
+        <p class="settings-row-label">自動保存について</p>
+        <p class="settings-row-desc">入力・カード追加・カード削除・並び替えのたびに、この端末へ自動的に保存されます。</p>
+        <button id="resetFamilyBtn" class="btn-danger" type="button">入力内容を削除して最初から作成する</button>
+      </div>
     </div>
 
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-tab="input" type="button">
+        <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        <span>入力</span>
+      </button>
+      <button class="nav-btn" data-tab="preview" type="button">
+        <svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        <span>プレビュー</span>
+      </button>
+      <button class="nav-btn" data-tab="settings" type="button">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.4-2-3.4-2.3.8a7.7 7.7 0 0 0-1.8-1l-.3-2.4h-4l-.3 2.4a7.7 7.7 0 0 0-1.8 1l-2.3-.8-2 3.4 2 1.4a7.6 7.6 0 0 0 0 2l-2 1.4 2 3.4 2.3-.8a7.7 7.7 0 0 0 1.8 1l.3 2.4h4l.3-2.4a7.7 7.7 0 0 0 1.8-1l2.3.8 2-3.4-2-1.4Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <span>設定</span>
+      </button>
+    </nav>
   </section>
 
 </div>
