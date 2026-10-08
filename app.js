@@ -1,29 +1,33 @@
 /* ============================================================
-   家族紹介フォーム – app.js
+   家族紹介フォーム – app.js（自動ペア判定方式）
    ------------------------------------------------------------
-   婚活プロフィール本体（selfintroduction/app.js）のUI・LIFF連携・
-   共有まわりの実装パターンを踏襲。
-   共有リンクは「id（このデータ専用のランダムID）＋復号鍵
-   （URLのフラグメント）」のみで構成される。内容は暗号化された
-   うえで GAS 経由でスプレッドシートに保存され、復号鍵はサーバー
-   に送信されない（URLの # 以降はブラウザからサーバーへ送信され
-   ないため）。
-   継続的に編集し続けるデータという性質上、id・鍵は端末に保存して
-   使い回し、プレビュー画面の送信ボタンを押すたびに同じリンクの
-   まま中身だけを最新の内容に更新する。
+   プロポーズプラン（propose/app.js）と同じ自動ペア判定方式を採用。
+   ・ユーザーは暗号キーの入力も共有リンクの送付も一切行わない。
+   ・サーバーに送るのは ownerHash（LINE userIdのSHA-256）だけ。
+   ・familyintroduction用GASが毎回 Partners中央API に ownerHash を
+     問い合わせ、「現在の真剣交際パートナー」と「ペア専用の暗号鍵
+     材料(pairKey)」を自動的に取得し、fetchPairの応答に含めて返す。
+   ・pairKeyの生値はユーザーには一切表示せず、ブラウザのメモリ上で
+     AES鍵の導出にのみ使う（自分／お相手双方の家族紹介データの
+     暗号化・復号のため）。
+   ・プロポーズプランと違い、家族紹介はお互いが「それぞれ自分の
+     家族」を紹介するコンテンツのため、プレビューは「自分」と
+     「お相手」の2つを切り替えて表示する。お相手のページは
+     閲覧専用（編集不可）。
+   ・「送信する」を押すまでは、自分のデータはこの端末の中だけに
+     保存され、お相手には届かない（サーバーに行が存在しない＝
+     未送信として扱われる）。
    ============================================================ */
 
-/* ▼▼▼ 家族紹介用LIFFアプリのID（婚活プロフィールと同じLIFFアプリを
-   使う場合はこのままでOK。別のLIFFアプリを作成した場合はここを
-   書き換えてください） ▼▼▼ */
 const LIFF_ID = "2010606364-4Z0ugW4X";
 
 /* ▼▼▼ 家族紹介用に新しくデプロイしたGAS Web AppのURLをここに設定してください ▼▼▼ */
 const GAS_ENDPOINT = "ここに家族紹介用GASのデプロイURLを設定してください";
 
-const STORAGE_KEY            = "family_intro_draft_v1";
-const SHARE_INFO_KEY         = "family_intro_share_v1";
-const SHARE_VIEW_PENDING_KEY = "family_intro_shared_view_pending_v1";
+/* ▼▼▼ パートナー登録（真剣交際パートナー機能）のLIFF URL ▼▼▼ */
+const PARTNER_REGISTRATION_URL = "https://liff.line.me/2010312230-xUsYz0UB";
+
+const STORAGE_KEY = "family_intro_draft_v1";
 
 const RELATION_LIST = ["父","母","兄","姉","弟","妹","祖父","祖母","おじ","おば","その他"];
 
@@ -55,6 +59,7 @@ function escapeHTML(str){
    スクリーンショットの撮影自体は検知・ブロックできないため、
    「撮られても誰が・いつ見た画面かが写り込む」ようにし、
    無断転載・拡散への心理的な抑止力として機能させる。
+   お相手の家族紹介を閲覧している間のみ表示する。
    ------------------------------------------------------------ */
 function buildWatermarkSVG(lines){
   const tileW = 240, tileH = 140;
@@ -85,9 +90,13 @@ function showScreenshotWatermark(viewerHash){
   el.style.backgroundImage = `url("${buildWatermarkSVG(lines)}")`;
   el.classList.add("show");
 }
+function hideScreenshotWatermark(){
+  const el = document.getElementById("screenshotWatermark");
+  if(el) el.classList.remove("show");
+}
 
 /* ============================================================
-   Base64URL 変換ユーティリティ（AES鍵・暗号文の符号化に使用）
+   Base64URL 変換ユーティリティ（暗号文の符号化に使用）
    ============================================================ */
 function bufToBase64Url(buf) {
   const bytes = new Uint8Array(buf);
@@ -114,23 +123,21 @@ async function sha256Hex(str) {
 }
 
 /* ============================================================
-   AES-GCM 暗号化ユーティリティ
-   鍵はURLのフラグメント（#以降）＋端末のlocalStorageにのみ保持し、
-   サーバーには渡さない。
+   暗号鍵材料（pairKey）からのAES鍵導出
+   ・pairKeyの生値はfetchPairの応答で自動的に受け取る。
+     ユーザーが目にしたり入力したりすることはない。
+   ・他アプリ（プロポーズプラン等）とpairKeyの値自体は共通でも、
+     導出に使うプレフィックスをアプリごとに変えることで、
+     アプリをまたいで同じ鍵が再利用されないようにしている。
    ============================================================ */
-async function generateShareKey() {
-  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
-  const raw = await crypto.subtle.exportKey("raw", key);
-  return { key, base64: bufToBase64Url(raw) };
+async function deriveAesKey(pairKey) {
+  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("family-intro-cipher:" + pairKey));
+  return crypto.subtle.importKey("raw", material, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
-async function importShareKey(base64) {
-  const raw = base64UrlToBuf(base64);
-  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["decrypt"]);
-}
-async function importShareKeyFull(base64) {
-  const raw = base64UrlToBuf(base64);
-  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
-}
+
+/* ============================================================
+   AES-GCM 暗号化ユーティリティ
+   ============================================================ */
 async function encryptJSON(obj, key) {
   const iv  = crypto.getRandomValues(new Uint8Array(12));
   const enc = new TextEncoder().encode(JSON.stringify(obj));
@@ -148,28 +155,15 @@ async function decryptJSON(base64, key) {
   return JSON.parse(new TextDecoder().decode(plainBuf));
 }
 
-/* crypto.randomUUID が使えない古い環境用のフォールバック */
-function fallbackUUID() {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-/* ============================================================
-   共有情報（id・鍵）の端末保存
-   ============================================================ */
-function loadShareInfo() {
-  try {
-    const raw = localStorage.getItem(SHARE_INFO_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (_) {
-    return null;
+/* ------------------------------------------------------------
+   LINEユーザーIDの取得
+   ------------------------------------------------------------ */
+function getLineUserId() {
+  const idToken = liff.getDecodedIDToken();
+  if (!idToken || !idToken.sub) {
+    throw new Error("ID token is not available (sub claim missing)");
   }
-}
-function saveShareInfo(info) {
-  try { localStorage.setItem(SHARE_INFO_KEY, JSON.stringify(info)); } catch (_) {}
+  return idToken.sub;
 }
 
 /* ============================================================
@@ -313,7 +307,7 @@ function addFamilyCard(data={}){
 }
 
 /* ============================================================
-   下書き保存／復元
+   下書き保存／復元（この端末の中だけ。お相手には届かない）
    ============================================================ */
 function saveDraft(){
   try{
@@ -339,98 +333,58 @@ function loadDraft(){
 }
 
 /* ============================================================
-   共有データの収集
+   送信データの収集
    ============================================================ */
-function collectShareData(){
+function collectSubmitData(){
   return {
     list: collectAllFamilyData(),
     createdAt: createdAt || "",
   };
 }
-function getFormBaseURL(){ return location.href.split("?")[0].split("#")[0]; }
-
-/* ------------------------------------------------------------
-   LINEユーザーIDの取得
-   liff.getProfile() はLINEサーバーへの追加API呼び出しが必要で、
-   ログイン直後などタイミングによって不安定になりやすい。
-   ログイン時に発行されるIDトークンをその場でデコードするだけなら
-   通信が発生せず、ユーザーID（sub）を安定して取得できる。
-   ------------------------------------------------------------ */
-function getLineUserId() {
-  const idToken = liff.getDecodedIDToken();
-  if (!idToken || !idToken.sub) {
-    throw new Error("ID token is not available (sub claim missing)");
-  }
-  return idToken.sub;
-}
 
 /* ============================================================
-   共有の公開／更新（GAS連携）
-   ------------------------------------------------------------
-   ・端末に保存済みのid・鍵があれば使い回そうとする（＝同じ共有
-     リンクのまま中身だけ最新化される）。無ければ新規に発行する。
-   ・ただし、その保存済みリンクをすでに誰かが開いていた場合は、
-     サーバー側が新しいidを発行して返してくる。その場合はここで
-     新しいidを採用し、以後はそのidを使い回す（鍵は変えない）。
-   ・戻り値: 発行された共有URL
+   ペア状態（パートナー登録確認・自分／お相手の家族紹介データ）
    ============================================================ */
-async function publishAndShare(shareName){
-  if(!createdAt){ createdAt = new Date().toISOString(); saveDraft(); }
+const AppState = {
+  ownerHash: null,
+  aesKey: null,
+  partnerDisplayName: "",
+  ownSubmittedAt: null,   // 自分が最後に送信した日時（未送信ならnull）
+  partnerCipherText: null, // お相手の暗号化データ（未送信ならnull）
+  partnerUpdatedAt: null,
+};
 
-  const shareData = collectShareData();
+async function fetchPair(ownerHash){
+  const url = `${GAS_ENDPOINT}?action=fetchPair&ownerHash=${encodeURIComponent(ownerHash)}`;
+  const resp = await fetch(url, { method: "GET" });
+  return resp.json();
+}
 
-  let shareInfo = loadShareInfo();
-  let cryptoKey;
-  if(shareInfo){
-    cryptoKey = await importShareKeyFull(shareInfo.key);
-  }else{
-    const generated = await generateShareKey();
-    cryptoKey = generated.key;
-    shareInfo = { id: (crypto.randomUUID ? crypto.randomUUID() : fallbackUUID()), key: generated.base64 };
-  }
-
-  const cipherText = await encryptJSON(shareData, cryptoKey);
-
-  const userId    = getLineUserId();
-  const ownerHash = await sha256Hex(userId);
-
+async function submitOwnData(){
+  const data = collectSubmitData();
+  const cipherText = await encryptJSON(data, AppState.aesKey);
   const resp = await fetch(GAS_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" }, // preflight回避のため text/plain を使用
-    body: JSON.stringify({ action: "share", id: shareInfo.id, cipherText, ownerHash }),
+    body: JSON.stringify({ action: "submit", ownerHash: AppState.ownerHash, cipherText }),
   });
-
   if(!resp.ok){
-    // GAS側(doPost)まで届く前にGoogleのゲートウェイ等で弾かれているケース。
-    // ここで実際のレスポンス本文をログに出しておくと原因特定に役立つ。
     const bodyText = await resp.text().catch(()=>"(本文を取得できませんでした)");
-    console.error(`share request failed: HTTP ${resp.status} ${resp.statusText}`, bodyText);
+    console.error(`submit failed: HTTP ${resp.status} ${resp.statusText}`, bodyText);
     throw new Error(`http_${resp.status}`);
   }
-
   const result = await resp.json();
-  if(!result.ok) throw new Error(result.reason || "share_failed");
-
-  // サーバーが新しいidを発行した場合（＝保存済みリンクがすでに誰かに
-  // 開かれていたため新しい行になった場合）はそちらを採用する。
-  // 鍵は変更しない（同じ鍵をそのまま使い回す）。
-  shareInfo = { id: result.id, key: shareInfo.key };
-  saveShareInfo(shareInfo);
-
-  const shareURL = `${getFormBaseURL()}?id=${shareInfo.id}#${shareInfo.key}`;
-  const name = (shareName||"").trim();
-  const previewMsg = name
-    ? `${name}さんのご家族紹介が届きました。\n回答をみる→${shareURL}`
-    : `ご家族紹介が届きました。\n回答をみる→${shareURL}`;
-
-  return { shareURL, previewMsg, flexMessage: buildShareFlexMessage(name, shareURL) };
+  if(!result.ok) throw new Error(result.reason || "submit_failed");
+  AppState.ownSubmittedAt = result.updatedAt || new Date().toISOString();
+  return result;
 }
 
 /* ============================================================
-   フォーム要素を隠す（公開ビュー／状態表示に切り替える共通処理）
+   状態表示（パートナー確認中・エラーなど）
    ============================================================ */
-function showPublicState(title, text, isLoading = false){
+function showAppState(title, text, isLoading = false){
   document.getElementById("app").style.display = "none";
+  document.getElementById("partnerRequired").style.display = "none";
   const pv = document.getElementById("publicView");
   pv.style.display = "block";
   pv.innerHTML = `
@@ -447,103 +401,79 @@ function showPublicState(title, text, isLoading = false){
   `;
 }
 
+function showPartnerRequired(){
+  document.getElementById("app").style.display = "none";
+  document.getElementById("publicView").style.display = "none";
+  document.getElementById("partnerRequired").style.display = "block";
+}
+
+function showApp(){
+  document.getElementById("publicView").style.display = "none";
+  document.getElementById("partnerRequired").style.display = "none";
+  document.getElementById("app").style.display = "";
+}
+
 /* ============================================================
-   共有リンクを開いたときの処理
-   ・URLの ?id=... がスプレッドシート上のレコードを指す
-   ・URLの #以降 が復号鍵（サーバーには送信されない）
-   ・閲覧にはLINEログインが必須（viewerHashによるアクセス制御のため）
+   パートナー登録確認（自動ペア判定）
    ============================================================ */
-async function handleSharedView(id, keyBase64){
-  showPublicState("読み込み中…", "内容を確認しています。少々お待ちください。", true);
+async function initPairing(){
+  showAppState("読み込み中…", "パートナー登録の状況を確認しています。少々お待ちください。", true);
 
-  if(!keyBase64){
-    showPublicState(
-      "リンクが不完全です",
-      "共有リンクが途中で切れているか、正しくコピーされていない可能性があります。共有した相手にもう一度リンクを送ってもらってください。"
-    );
-    return;
-  }
-
-  try{
-    await liff.init({ liffId: LIFF_ID });
-  }catch(e){
-    console.error("LIFF init failed", e);
-    showPublicState("エラー", "LIFFの初期化に失敗しました。時間をおいて再度お試しください。");
-    return;
-  }
-
-  if(!liff.isLoggedIn()){ liff.login(); return; }
-
-  // ここまで来ればリダイレクトは発生しないはずなので、一時保存していた
-  // 復元用の情報は不要になる（消し忘れて別のリンクに誤って使われるのを防ぐ）
-  try{ sessionStorage.removeItem(SHARE_VIEW_PENDING_KEY); }catch(_){}
-
-  let key;
-  try{
-    key = await importShareKey(keyBase64);
-  }catch(e){
-    console.error("key import error", e);
-    showPublicState("リンクが正しくありません", "共有リンクが壊れている可能性があります。");
-    return;
-  }
-
-  let viewerHash;
-  try{
-    const userId = getLineUserId();
-    viewerHash = await sha256Hex(userId);
-  }catch(e){
-    console.error("get user id error", e);
-    showPublicState(
-      "エラー",
-      "LINEアカウント情報の確認に失敗しました。時間をおいてもう一度お試しください。" +
-      "（詳細: " + (e && e.message ? e.message : String(e)) + "）"
-    );
-    return;
-  }
+  const ownerHash = await sha256Hex(getLineUserId());
+  AppState.ownerHash = ownerHash;
 
   let result;
   try{
-    const url = `${GAS_ENDPOINT}?action=view&id=${encodeURIComponent(id)}&viewerHash=${encodeURIComponent(viewerHash)}`;
-    const resp = await fetch(url, { method: "GET" });
-    result = await resp.json();
+    result = await fetchPair(ownerHash);
   }catch(e){
-    console.error("fetch view error", e);
-    showPublicState("通信エラー", "内容を取得できませんでした。通信環境を確認してもう一度お試しください。");
-    return;
+    console.error("fetchPair failed", e);
+    showAppState("読み込みに失敗しました", "時間をおいてもう一度開き直してください。");
+    return false;
   }
 
   if(!result.ok){
-    if(result.reason === "forbidden"){
-      showPublicState(
-        "閲覧できません",
-        "このリンクは最初に開いた方専用です。転送されたリンクは、その方以外は閲覧できない仕組みになっています。"
-      );
-    }else if(result.reason === "partner_locked"){
-      showPublicState(
-        "閲覧できません",
-        "このリンクは現在のお相手専用です。"
-      );
-    }else if(result.reason === "revoked" || result.reason === "expired" || result.reason === "deleted"){
-      showPublicState("リンクが無効です", "このリンクはすでに無効になっています。最新の共有リンクを送ってもらってください。");
-    }else if(result.reason === "not_found"){
-      showPublicState("リンクが見つかりません", "このリンクは存在しないか、削除された可能性があります。");
+    if(result.reason === "no_partner" || result.reason === "partner_ended"){
+      showPartnerRequired();
     }else{
-      showPublicState("エラー", "内容を取得できませんでした。時間をおいて再度お試しください。");
+      showAppState("読み込みに失敗しました", "時間をおいてもう一度開き直してください。");
     }
-    return;
+    return false;
   }
 
-  let data;
+  AppState.aesKey             = await deriveAesKey(result.pairKey);
+  AppState.partnerDisplayName = result.partnerDisplayName || "";
+  AppState.ownSubmittedAt     = result.own ? result.own.updatedAt : null;
+  AppState.partnerCipherText  = result.partner ? result.partner.cipherText : null;
+  AppState.partnerUpdatedAt   = result.partner ? result.partner.updatedAt : null;
+
+  const partnerBtn = document.getElementById("partnerTabBtn");
+  if(partnerBtn) partnerBtn.textContent = AppState.partnerDisplayName ? `${AppState.partnerDisplayName}さん` : "お相手";
+
+  showApp();
+  return true;
+}
+
+/* ペア情報だけを取り直す（画面遷移はせず、お相手の最新状況だけ更新） */
+async function refetchPair(){
+  let result;
   try{
-    data = await decryptJSON(result.cipherText, key);
+    result = await fetchPair(AppState.ownerHash);
   }catch(e){
-    console.error("decrypt error", e);
-    showPublicState("復号に失敗しました", "リンクの一部が正しくない可能性があります。共有した相手にもう一度リンクを送ってもらってください。");
-    return;
+    console.error("refetchPair failed", e);
+    alert("お相手の状況を取得できませんでした。通信環境を確認してもう一度お試しください。");
+    return false;
   }
-
-  renderPublicView(data);
-  showScreenshotWatermark(viewerHash);
+  if(!result.ok){
+    // 取得中に交際終了などがあった場合は案内画面に戻す
+    showPartnerRequired();
+    return false;
+  }
+  AppState.partnerDisplayName = result.partnerDisplayName || "";
+  AppState.partnerCipherText  = result.partner ? result.partner.cipherText : null;
+  AppState.partnerUpdatedAt   = result.partner ? result.partner.updatedAt : null;
+  const partnerBtn = document.getElementById("partnerTabBtn");
+  if(partnerBtn) partnerBtn.textContent = AppState.partnerDisplayName ? `${AppState.partnerDisplayName}さん` : "お相手";
+  return true;
 }
 
 /* ============================================================
@@ -595,44 +525,102 @@ function buildFamilyListHTML(list){
 }
 
 /* ============================================================
-   プレビュー・公開ビュー 共通の描画
+   プレビュー 共通の描画（自分／お相手どちらも使う）
    ============================================================ */
 function renderFamilyContent(container, list, opts={}){
-  const { showViewerCTA=false } = opts;
-  const dateLabel = formatDateLabel(createdAt||"");
+  const { headingName="", dateIso="" } = opts;
+  const dateLabel = formatDateLabel(dateIso||"");
 
   container.innerHTML = `
     <div class="family-view-header">
       <div class="family-view-header-deco">${decoFlourishSVG()}</div>
-      <p class="family-view-title">家族紹介</p>
+      <p class="family-view-title">${escapeHTML(headingName)}家族紹介</p>
       <p class="family-view-sub">FAMILY INTRODUCTION</p>
       ${dateLabel ? `<p class="family-view-date">作成日：${escapeHTML(dateLabel)}</p>` : ""}
     </div>
     ${buildFamilyListHTML(list)}
-    ${showViewerCTA ? `
-    <div class="cta-card">
-      <p class="cta-title">あなたも家族紹介を作ってみませんか？</p>
-      <p class="cta-text">ご家族お一人おひとりの人柄を、まとめてお相手に届けられます。</p>
-      <button type="button" class="btn-primary cta-btn" id="ctaCreateBtn">私も作成する</button>
-    </div>` : ""}
   `;
+}
 
-  if(showViewerCTA){
-    const btn = container.querySelector("#ctaCreateBtn");
-    if(btn) btn.addEventListener("click", ()=>{ location.href = getFormBaseURL(); });
+/* ----- 自分のプレビュー（編集中の内容をそのまま表示） ----- */
+function renderOwnPreview(){
+  renderFamilyContent(document.getElementById("previewContent"), collectAllFamilyData(), { headingName:"", dateIso: createdAt });
+}
+
+/* ----- お相手のプレビュー（まだ未送信なら案内のみ） ----- */
+async function renderPartnerPreview(){
+  const container = document.getElementById("previewContent");
+  const name = AppState.partnerDisplayName || "お相手";
+
+  if(!AppState.partnerCipherText){
+    container.innerHTML = `
+      <div class="family-preview-empty">
+        ${escapeHTML(name)}さんはまだ家族紹介を送信していません。<br>
+        送信されると、ここに表示されます。
+      </div>
+      <button type="button" class="partner-refresh-btn" id="partnerRefreshBtn">最新の状況を取得する</button>
+    `;
+  }else{
+    let data;
+    try{
+      data = await decryptJSON(AppState.partnerCipherText, AppState.aesKey);
+    }catch(e){
+      console.error("decrypt partner data failed", e);
+      container.innerHTML = `<div class="family-preview-empty">お相手のデータの復号に失敗しました。時間をおいてもう一度お試しください。</div>`;
+      return;
+    }
+    renderFamilyContent(container, data.list||[], { headingName: `${name}さんの`, dateIso: data.createdAt });
+    const html = container.innerHTML;
+    container.innerHTML = html + `<button type="button" class="partner-refresh-btn" id="partnerRefreshBtn">最新の状況を取得する</button>`;
+  }
+
+  const refreshBtn = document.getElementById("partnerRefreshBtn");
+  if(refreshBtn){
+    refreshBtn.addEventListener("click", async ()=>{
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = "取得中…";
+      const ok = await refetchPair();
+      if(ok && currentPreviewPerson === "partner") await renderPartnerPreview();
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = "最新の状況を取得する";
+    });
+  }
+}
+
+/* ============================================================
+   プレビュー：自分／お相手 切り替え
+   ============================================================ */
+let currentPreviewPerson = "own";
+
+async function switchPreviewPerson(person){
+  currentPreviewPerson = person;
+  document.querySelectorAll(".preview-person-switcher .sub-switch-btn").forEach(btn=>{
+    btn.classList.toggle("active", btn.dataset.person === person);
+  });
+
+  const ownSubmittedAtEl = document.getElementById("ownSubmittedAt");
+
+  if(person === "own"){
+    hideScreenshotWatermark();
+    renderOwnPreview();
+    if(ownSubmittedAtEl){
+      if(AppState.ownSubmittedAt){
+        ownSubmittedAtEl.textContent = `お相手への送信日時：${formatDateLabel(AppState.ownSubmittedAt)}`;
+        ownSubmittedAtEl.classList.remove("hidden");
+      }else{
+        ownSubmittedAtEl.textContent = "まだお相手に送信していません。「送信する」を押すと届きます。";
+        ownSubmittedAtEl.classList.remove("hidden");
+      }
+    }
+  }else{
+    if(ownSubmittedAtEl) ownSubmittedAtEl.classList.add("hidden");
+    await renderPartnerPreview();
+    showScreenshotWatermark(AppState.ownerHash);
   }
 }
 
 function renderFamilyPreview(){
-  renderFamilyContent(document.getElementById("previewContent"), collectAllFamilyData(), { showViewerCTA:false });
-}
-
-function renderPublicView(shared){
-  document.getElementById("app").style.display = "none";
-  const pv = document.getElementById("publicView");
-  pv.style.display = "block";
-  createdAt = shared.createdAt || null;
-  renderFamilyContent(pv, shared.list||[], { showViewerCTA:true });
+  switchPreviewPerson(currentPreviewPerson);
 }
 
 /* ============================================================
@@ -642,7 +630,7 @@ function switchTab(tab){
   ["input","preview","settings"].forEach(t=>{
     document.getElementById(`tab-${t}`).classList.toggle("hidden", t !== tab);
   });
-  document.querySelectorAll(".nav-btn").forEach(btn=>{
+  document.querySelectorAll(".bottom-nav .nav-btn").forEach(btn=>{
     btn.classList.toggle("active", btn.dataset.tab === tab);
   });
   const titles = { preview:"プレビュー", settings:"設定" };
@@ -650,7 +638,9 @@ function switchTab(tab){
 
   if(tab === "preview"){
     if(!createdAt){ createdAt = new Date().toISOString(); saveDraft(); }
-    renderFamilyPreview();
+    switchPreviewPerson(currentPreviewPerson);
+  }else{
+    hideScreenshotWatermark();
   }
 }
 
@@ -671,160 +661,47 @@ function bindEvents(){
     clearTimeout(saveTimer); saveTimer = setTimeout(saveDraft, 500);
   });
 
-  document.querySelectorAll(".nav-btn").forEach(btn=>{
+  document.querySelectorAll(".bottom-nav .nav-btn").forEach(btn=>{
     btn.addEventListener("click", ()=>switchTab(btn.dataset.tab));
   });
   document.getElementById("backToInputBtn").addEventListener("click", ()=>switchTab("input"));
 
-  /* ----- 送信ボタン（プレビュー画面上部） ----- */
-  document.getElementById("sendBtn").addEventListener("click", ()=>{
-    const modal = document.getElementById("shareModal");
-    document.getElementById("shareName").value = "";
-    modal.classList.remove("hidden");
-    modal.classList.add("show");
+  document.querySelectorAll(".preview-person-switcher .sub-switch-btn").forEach(btn=>{
+    btn.addEventListener("click", ()=>switchPreviewPerson(btn.dataset.person));
   });
 
-  /* ----- 共有モーダル：共有する ----- */
-  document.getElementById("shareBtn").addEventListener("click", async()=>{
-    const shareBtn = document.getElementById("shareBtn");
-    const shareName = document.getElementById("shareName").value;
+  /* ----- 送信ボタン：お相手へ直接送信（宛先選択は不要。登録済みのお相手にのみ届く） ----- */
+  document.getElementById("sendBtn").addEventListener("click", async ()=>{
+    const name = AppState.partnerDisplayName || "お相手";
+    if(!confirm(`入力中の家族紹介を${name}さんに送信しますか？\n送信すると、これまでの内容が上書きされます。`)) return;
 
-    shareBtn.disabled = true;
-    const originalLabel = shareBtn.textContent;
-    shareBtn.textContent = "送信中…";
+    const sendBtn = document.getElementById("sendBtn");
+    sendBtn.disabled = true;
+    const originalLabel = sendBtn.textContent;
+    sendBtn.textContent = "送信中…";
 
     try{
-      const { flexMessage, previewMsg, shareURL } = await publishAndShare(shareName);
-
-      const modal = document.getElementById("shareModal");
-      modal.classList.remove("show");
-      modal.classList.add("hidden");
-
-      const lineURL = `https://line.me/R/msg/text/?${encodeURIComponent(previewMsg)}`;
-      await shareToOthers(flexMessage, previewMsg, lineURL);
+      await submitOwnData();
+      alert("送信しました。");
+      if(currentPreviewPerson === "own") switchPreviewPerson("own");
     }catch(e){
-      console.error("share error", e);
+      console.error("submit error", e);
       alert("送信に失敗しました。通信環境を確認してもう一度お試しください。");
     }finally{
-      shareBtn.disabled = false;
-      shareBtn.textContent = originalLabel;
-    }
-  });
-
-  /* ----- モーダル外クリックで閉じる ----- */
-  document.getElementById("shareModal").addEventListener("click", (e)=>{
-    if(e.target === e.currentTarget){
-      e.currentTarget.classList.remove("show");
-      e.currentTarget.classList.add("hidden");
+      sendBtn.disabled = false;
+      sendBtn.textContent = originalLabel;
     }
   });
 
   document.getElementById("resetFamilyBtn").addEventListener("click", ()=>{
-    if(!confirm("入力内容を削除して最初から作成しますか？この操作は取り消せません。")) return;
+    if(!confirm("入力内容を削除して最初から作成しますか？この操作は取り消せません。\n（すでにお相手に送信済みの内容は、この操作では削除されません）")) return;
     try{ localStorage.removeItem(STORAGE_KEY); }catch(_){}
-    try{ localStorage.removeItem(SHARE_INFO_KEY); }catch(_){}
-    location.href = getFormBaseURL();
+    location.reload();
   });
 }
 
 /* ============================================================
-   共有：シェアターゲットピッカー用 Flexメッセージ
-   長い共有URLはボタン(uriアクション)の中に格納するため、
-   相手に見える本文には長いリンクが表示されない。
-   ※ uriアクションのURLは1000文字以内という制限があるため、
-     超える場合は liff.shareTargetPicker 側でエラーになり、
-     呼び出し元で従来のURLスキーム方式にフォールバックする。
-   ※ hero画像のURLは、LINEのサーバーから読み込める公開HTTPS URL
-     である必要がある（ローカルパスや相対パスは不可）。
-     画像は1MB以下を推奨。PNGの透過部分はそのまま送ると
-     反映されない場合があるため、白背景に合成したJPEGを使用する。
-   ============================================================ */
-const SHARETARGETPICKER_IMAGE_URL = "https://marriagesketch.github.io/-familyintroduction-/sharetargetpicker.jpg";
-
-function buildShareFlexMessage(name, shareURL){
-  const nameLine = name ? `${name}さんのご家族紹介が届きました` : "ご家族紹介が届きました";
-
-  return {
-    type: "flex",
-    altText: `家族紹介 - ${nameLine}`,
-    contents: {
-      type: "bubble",
-      hero: {
-        type: "image",
-        url: SHARETARGETPICKER_IMAGE_URL,
-        size: "full",
-        aspectRatio: "3:2",
-        aspectMode: "cover"
-      },
-      body: {
-        type: "box",
-        layout: "vertical",
-        spacing: "md",
-        paddingAll: "20px",
-        contents: [
-          { type: "text", text: "家族紹介", size: "xs", weight: "bold", color: "#d96c7d" },
-          { type: "text", text: nameLine, size: "lg", weight: "bold", wrap: true, margin: "sm" },
-          { type: "text", text: "ボタンから内容を確認できます。", size: "sm", color: "#888888", wrap: true, margin: "md" }
-        ]
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        spacing: "sm",
-        paddingAll: "20px",
-        contents: [
-          {
-            type: "button",
-            style: "primary",
-            height: "sm",
-            color: "#f48ca0",
-            action: { type: "uri", label: "回答をみる", uri: shareURL }
-          }
-        ]
-      }
-    }
-  };
-}
-
-/* ------------------------------------------------------------
-   共有先を選んで送信する
-   1. シェアターゲットピッカーが使える場合、まずFlexメッセージ
-      （カード形式）での送信を試みる
-   2. Flexが失敗した場合（URLが長すぎる等）は、同じ複数選択画面の
-      ままテキストメッセージとして再送信を試みる
-      （テキストメッセージにはFlexボタンのuriのような1000文字の
-      制限が無いため、Flexで失敗したケースでも通りやすい）
-   3. それでも失敗した場合、または端末がシェアターゲットピッカー
-      自体に対応していない場合は、従来のURLスキーム方式（送信先を
-      選択画面を開いてテキストメッセージを送る）にフォールバック
-   ------------------------------------------------------------ */
-async function shareToOthers(flexMessage, textPreviewMsg, fallbackLineSchemeURL){
-  if(liff.isApiAvailable("shareTargetPicker")){
-    try{
-      await liff.shareTargetPicker([flexMessage], { isMultiple: true });
-      return;
-    }catch(e){
-      console.warn("shareTargetPicker (flex) failed, retrying as text:", e);
-    }
-
-    try{
-      await liff.shareTargetPicker(
-        [{ type: "text", text: textPreviewMsg }],
-        { isMultiple: true }
-      );
-      return;
-    }catch(e){
-      console.warn("shareTargetPicker (text) failed, falling back to URL scheme:", e);
-    }
-  }
-
-  if(liff.isInClient()){ window.location.href = fallbackLineSchemeURL; }
-  else{ window.open(fallbackLineSchemeURL, "_blank"); }
-}
-
-/* ============================================================
    友だち追加チェック
-   ※ LIFF初期化・ログイン済みの状態で呼び出すこと（liff.init は呼ばない）
    ============================================================ */
 async function checkFriendship(){
   try{
@@ -845,37 +722,19 @@ async function checkFriendship(){
    メイン処理
    ============================================================ */
 (async()=>{
-  const params = new URLSearchParams(location.search);
-  let sharedId  = params.get("id");
-  let keyBase64 = location.hash ? location.hash.slice(1) : "";
-
-  // liff.init()/liff.login() が内部でリダイレクト（ログイン・友だち追加など）
-  // を行うと、URLのクエリ(id)やフラグメント(復号鍵)が失われることがある。
-  // そのため、リダイレクト前に一度sessionStorageへ保存しておき、リダイレクト
-  // 後に情報が欠けていたらそこから補完する。
-  let pending = null;
-  try{ pending = JSON.parse(sessionStorage.getItem(SHARE_VIEW_PENDING_KEY) || "null"); }catch(_){}
-
-  if(sharedId && keyBase64){
-    try{ sessionStorage.setItem(SHARE_VIEW_PENDING_KEY, JSON.stringify({ id: sharedId, key: keyBase64 })); }catch(_){}
-  }else if(pending && (!sharedId || pending.id === sharedId)){
-    if(!sharedId)  sharedId  = pending.id;
-    if(!keyBase64) keyBase64 = pending.key;
-  }
-
-  if(sharedId){ await handleSharedView(sharedId, keyBase64); return; }
-
   try{ await liff.init({ liffId: LIFF_ID }); }
   catch(e){ console.error("LIFF init failed", e); alert("LIFFの初期化に失敗しました。"); return; }
 
   if(!liff.isLoggedIn()){ liff.login(); return; }
 
   /* LIFF初期化・ログイン後に友だち確認（未追加ならダイアログで追加を促す）
-     liff.getFriendship() / requestFriendship() はLINEサーバーへの通信を
-     伴うため、ここをawaitすると電波が悪い時に画面表示自体が止まって
-     しまう。必須の処理ではないので、裏側で実行させて画面構築は
-     先に進める（fire-and-forget）。 */
+     通信を伴うため画面構築をブロックしないよう、裏側で実行する
+     （fire-and-forget）。 */
   checkFriendship();
+
+  /* パートナー登録の確認（未登録・交際終了なら案内を表示して終了） */
+  const paired = await initPairing();
+  if(!paired) return;
 
   const hadDraft = loadDraft();
 
@@ -892,12 +751,11 @@ async function checkFriendship(){
   }
 
   startBtn.addEventListener("click", ()=>{
-    if(hadDraft && !confirm("これまでの下書きを削除して、新しく作成しますか？")) return;
+    if(hadDraft && !confirm("これまでの下書きを削除して、新しく作成しますか？\n（すでにお相手に送信済みの内容は、この操作では削除されません）")) return;
     if(hadDraft){
       document.getElementById("familyList").innerHTML = "";
       createdAt = null;
       try{ localStorage.removeItem(STORAGE_KEY); }catch(_){}
-      try{ localStorage.removeItem(SHARE_INFO_KEY); }catch(_){}
     }
     goToMain();
   });

@@ -364,6 +364,23 @@ textarea{ min-height:72px; resize:vertical; line-height:1.6; }
   padding:32px 20px; text-align:center; color:var(--ink-soft); font-size:14px;
 }
 
+/* ============================================================
+   プレビュー：自分／お相手 切替、送信日時表示
+   ============================================================ */
+.preview-submitted-at{
+  display:inline-flex; margin:0 0 14px; background:none; padding:0;
+  color:var(--ink-soft); font-size:12px;
+}
+.preview-person-switcher{ margin-bottom:16px; }
+.preview-person-switcher .sub-switch-btn:disabled{ opacity:.5; cursor:default; }
+
+.partner-refresh-btn{
+  display:block; width:100%; margin:14px 0 0; padding:12px;
+  border:1px solid var(--pink-border); border-radius:var(--radius-pill);
+  background:#fff; color:var(--ink-soft); font-size:13px; font-weight:600; cursor:pointer;
+}
+.partner-refresh-btn:active{ opacity:.8; }
+
 /********************************
  * 共有モーダル
  ********************************/
