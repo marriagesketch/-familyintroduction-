@@ -2,19 +2,35 @@
    家族紹介 – GAS バックエンド (Code.gs)
    スプレッドシートID: 18EsNFzS77rYcL1jGiGJ-JtOCCcyDGO1dVh9FSCUJjg4
    ------------------------------------------------------------
-   ・シート「sheet」のみ作成（Analyticsシートは作成しない）
+   ・シート「Shares」のみ作成（Analyticsシートは作成しない）
    ------------------------------------------------------------
-   共有リンクの扱い（ハイブリッド方式）:
-   ・まだ誰にも開かれていない間は、同じid・同じリンクのまま
-     中身だけ上書き更新する（＝編集してもリンクは変わらない）。
-   ・誰かがそのリンクを一度開いた後にプロフィールを更新すると、
-     その行は履歴として残したまま、新しいid・新しいリンクを
-     発行する（＝閲覧済みのリンクの中身は勝手に変わらない）。
-   ・アクセス制御（本人／初回閲覧者のみ）は他アプリと同様。
+   共有方式（自動ペア判定方式・プロポーズプランと同方式）:
+   ・従来の「共有リンク（id＋復号鍵）を送る」方式はやめ、
+     真剣交際パートナー機能連携（Partners中央API）による
+     自動ペア判定方式に変更。
+   ・ユーザーは own（自分）の家族紹介データを自分のLINEアカウント
+     （ownerHashで識別）に紐づけて保存するだけでよい。リンクの
+     発行・送付は一切不要。
+   ・閲覧時は毎回 Partners中央API に ownerHash を問い合わせ、
+     「現在の真剣交際パートナー」と「ペア専用の暗号鍵材料(pairKey)」
+     を自動的に取得する。pairKeyから導出したAES鍵で、自分の
+     データと相手のデータの両方を復号できる。
+   ・パートナー登録が無い（または交際終了済みの）場合は、
+     fetchPairがエラーを返す。クライアント側（app.js）はこれを
+     見て「パートナー登録が必要です」という案内を表示する。
+   ・pairKey の生値はユーザーには一切表示されず、ブラウザの
+     メモリ上でAES鍵の導出にのみ使われる。
+   ・自分のデータは「送信する」ボタンを押すまでお相手には見えない
+     （行が存在しない＝未送信として扱う）。送信後は、押すたびに
+     同じ行を上書きする（最新の内容が常にお相手に届く）。
    ------------------------------------------------------------
    デプロイ方法:
    1. スプレッドシートを開き「拡張機能 > Apps Script」でこのコードを貼り付ける。
-   2. 「デプロイ > 新しいデプロイ」→ 種類「ウェブアプリ」
+   2. シート名「Shares」で、1行目に見出し（OWNER_HASH, CIPHER_TEXT,
+      SCHEMA_VERSION, CREATED_AT, UPDATED_AT）を作成しておく。
+      ※旧バージョン（共有リンク方式）からの移行の場合は、列構成が
+        変わるため、新しいシートとして作り直すことを推奨します。
+   3. 「デプロイ > 新しいデプロイ」→ 種類「ウェブアプリ」
       - 実行するユーザー: 自分
       - アクセスできるユーザー: 全員
       でデプロイする（すでに発行済みの /exec URL を app.js の
@@ -27,32 +43,35 @@ var SCHEMA_VERSION  = 1;
 
 // シートの列番号（1-indexed）
 var COL = {
-  ID: 1, CIPHER_TEXT: 2, ENCRYPTED_KEY: 3, OWNER_HASH: 4, VIEWER_HASH: 5,
-  STATUS: 6, SCHEMA_VERSION: 7, CREATED_AT: 8, UPDATED_AT: 9,
-  FIRST_VIEWED_AT: 10, LAST_VIEWED_AT: 11, VIEW_COUNT: 12
+  OWNER_HASH: 1, CIPHER_TEXT: 2, SCHEMA_VERSION: 3, CREATED_AT: 4, UPDATED_AT: 5
 };
 
 var DATA_START_ROW = 2; // 1行目=見出し, 2行目以降がデータ
 
 /* ------------------------------------------------------------
    真剣交際パートナー機能連携（Partners中央API）
-   ・このアプリにはAnalyticsシートが無いため、handleView側の
+   ・このアプリにはAnalyticsシートが無いため、fetchPair側の
      アクセス制御のみ対応する（Analytics同期は不要）。
+   ・status アクションのレスポンスには、他アプリ（selfintroduction等）
+     で使われている active / everPartnered / partnerHash に加えて、
+     プロポーズプランと同じ方式で使う pairKey（ペア専用の暗号鍵材料）と
+     partnerDisplayName（お相手がパートナー登録時に設定した表示名）が
+     含まれている前提です。もしPartners中央API側がまだこれらの
+     フィールドを返していない場合は、Partners側（別デプロイのコード）
+     を先に拡張してください。
    ------------------------------------------------------------ */
 var PARTNERS_ENDPOINT = 'https://script.google.com/macros/s/AKfycbzqT-qmVRh_jI04stlgYiWCypqWHjWkGv-0pNGkpvUt3c8FGQzQG_FBF7eWeb3frcDk/exec'; // ← Partners用GASの/exec URLを設定
 var INTERNAL_SECRET    = PropertiesService.getScriptProperties().getProperty('INTERNAL_SECRET') || '';
 
 /* 指定ownerHashの現在の真剣交際ステータスをPartners APIに問い合わせる。
-   ・ active: true  → viewerHash が partnerHash と一致する場合のみ閲覧許可
-   ・ everPartnered: true（かつ active:false）→ 過去に交際していたが現在は
-     パートナー不在（交際終了後など）。本人以外は誰にも見せない。
-   ・ 両方 false → 従来通り「初回閲覧者固定」ロジックを使う
-   結果は900秒（15分）キャッシュし、Partners API不通時は「everPartnered:false」
-   として従来ロジックにフォールバックする（閲覧を過剰にブロックしないため）。
-   ※以前は120秒キャッシュだったため、閲覧のたびに別GASへの外部fetchが頻発し、
-     それがコールドスタート等と重なって体感速度を落とす主因になっていた。
-     交際ステータスはリアルタイム性がそこまで重要ではないため、キャッシュを
-     延ばして外部呼び出し頻度を大きく減らす。 */
+   ・ active: true  → 現在のパートナー。partnerHash・pairKey・
+     partnerDisplayName が有効。
+   ・ everPartnered: true（かつ active:false）→ 過去に交際していたが
+     現在はパートナー不在（交際終了後など）。
+   ・ 両方 false → パートナー登録が一度も行われていない。
+   結果は900秒（15分）キャッシュし、Partners API不通時はエラー扱いにする
+   （このアプリの性質上、パートナー不在として誤って他人に見せるより、
+   　読み込みエラーとして安全側に倒す）。 */
 var PARTNER_STATUS_CACHE_SECONDS = 900;
 
 function getPartnerStatus(ownerHash) {
@@ -61,7 +80,7 @@ function getPartnerStatus(ownerHash) {
   var cached = cache.get(cacheKey);
   if (cached) return JSON.parse(cached);
 
-  var result = { active: false, everPartnered: false, partnerHash: '' };
+  var result = { ok: false, active: false, everPartnered: false, partnerHash: '', pairKey: '', partnerDisplayName: '' };
   try {
     var url = PARTNERS_ENDPOINT + '?action=status'
       + '&ownerHash=' + encodeURIComponent(ownerHash)
@@ -70,15 +89,20 @@ function getPartnerStatus(ownerHash) {
     var body = JSON.parse(res.getContentText());
     if (body.ok) {
       result = {
+        ok: true,
         active: !!body.active,
         everPartnered: !!body.everPartnered,
-        partnerHash: body.partnerHash || ''
+        partnerHash: body.partnerHash || '',
+        pairKey: body.pairKey || '',
+        partnerDisplayName: body.partnerDisplayName || ''
       };
     }
   } catch (err) {
     Logger.log('getPartnerStatus failed: ' + err);
   }
-  cache.put(cacheKey, JSON.stringify(result), PARTNER_STATUS_CACHE_SECONDS);
+  // 問い合わせ自体に失敗した場合（result.ok === false）は、誤って
+  // 「パートナー不在」として扱われないよう、短めのTTLのみキャッシュする。
+  cache.put(cacheKey, JSON.stringify(result), result.ok ? PARTNER_STATUS_CACHE_SECONDS : 30);
   return result;
 }
 
@@ -89,8 +113,8 @@ function getPartnerStatus(ownerHash) {
 function doGet(e) {
   try {
     var action = e.parameter.action;
-    if (action === 'view') {
-      return handleView(e.parameter.id, e.parameter.viewerHash);
+    if (action === 'fetchPair') {
+      return handleFetchPair(e.parameter.ownerHash);
     }
     return jsonResponse({ ok: false, reason: 'invalid_action' });
   } catch (err) {
@@ -101,8 +125,8 @@ function doGet(e) {
 function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);
-    if (body.action === 'share') {
-      return handleShare(body);
+    if (body.action === 'submit') {
+      return handleSubmit(body);
     }
     return jsonResponse({ ok: false, reason: 'invalid_action' });
   } catch (err) {
@@ -122,28 +146,38 @@ function getSheet() {
 
 
 /* ------------------------------------------------------------
-   共有登録／更新（ハイブリッド方式）
-   ・cipherText はクライアント側で AES-GCM 暗号化済みのため、
-     このサーバー（および管理者）は復号鍵を一切受け取らない。
-   ・id が既存行に存在し、かつ ownerHash が一致する場合：
-     - その行がまだ誰にも開かれていない（VIEWER_HASH が空）
-       → その行を上書き更新する（同じリンクのまま。従来通り）
-     - その行はすでに誰かに開かれている
-       → その行は履歴として残し、新しいidを発行して新しい行を
-         追加する（＝閲覧済みのリンクの中身は変えない）
-   ・id が存在しない場合（初回共有、または新しいidでの共有）：
-     → 同じ ownerHash の「未閲覧」の古い行があれば削除したうえで
-       新しい行を追加する（1人につき未閲覧の行は常に最大1つ）。
-   ・戻り値の id は実際に使われた（更新／追加された）行の id。
-     クライアント側は、送信した id と異なる id が返ってきた場合、
-     新しいリンクが発行されたと判断して保存し直す必要がある。
+   自分のデータを探す／保存する（ownerHash一意キー）
    ------------------------------------------------------------ */
-function handleShare(body) {
-  var id         = body.id;
-  var cipherText = body.cipherText;
-  var ownerHash  = body.ownerHash;
+function findRowByOwnerHash(sheet, ownerHash) {
+  if (!ownerHash) return null;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return null;
+  var hashes = sheet.getRange(DATA_START_ROW, COL.OWNER_HASH, lastRow - DATA_START_ROW + 1, 1).getValues();
+  for (var i = 0; i < hashes.length; i++) {
+    if (hashes[i][0] === ownerHash) return DATA_START_ROW + i;
+  }
+  return null;
+}
 
-  if (!id || !cipherText || !ownerHash) {
+function readRow(sheet, rowIndex) {
+  if (!rowIndex) return null;
+  var row = sheet.getRange(rowIndex, 1, 1, COL.UPDATED_AT).getValues()[0];
+  return {
+    cipherText: row[COL.CIPHER_TEXT - 1],
+    updatedAt:  row[COL.UPDATED_AT - 1]
+  };
+}
+
+/* ------------------------------------------------------------
+   送信（＝自分の行を作成／上書き）
+   ・この行が存在する＝お相手が閲覧可能な「送信済み」の状態。
+   ・送信するたびに同じ行の中身だけを最新化する（履歴は持たない）。
+   ------------------------------------------------------------ */
+function handleSubmit(body) {
+  var ownerHash  = body.ownerHash;
+  var cipherText = body.cipherText;
+
+  if (!ownerHash || !cipherText) {
     return jsonResponse({ ok: false, reason: 'invalid_params' });
   }
 
@@ -152,141 +186,54 @@ function handleShare(body) {
   try {
     var sheet = getSheet();
     var now = new Date();
-
-    var rowIndex = findRowById(sheet, id);
+    var rowIndex = findRowByOwnerHash(sheet, ownerHash);
 
     if (rowIndex) {
-      // 既存行（本人確認のためownerHashを照合）
-      var existingOwnerHash  = sheet.getRange(rowIndex, COL.OWNER_HASH).getValue();
-      var existingViewerHash = sheet.getRange(rowIndex, COL.VIEWER_HASH).getValue();
-      if (existingOwnerHash !== ownerHash) {
-        return jsonResponse({ ok: false, reason: 'forbidden' });
-      }
-
-      if (!existingViewerHash) {
-        // まだ誰にも開かれていない → 同じ行・同じリンクのまま上書き
-        sheet.getRange(rowIndex, COL.CIPHER_TEXT).setValue(cipherText);
-        sheet.getRange(rowIndex, COL.UPDATED_AT).setValue(now);
-        sheet.getRange(rowIndex, COL.STATUS).setValue('active');
-        return jsonResponse({ ok: true, id: id });
-      }
-      // すでに誰かに開かれている → この行はそのまま残し、下で新しい行を作る
+      sheet.getRange(rowIndex, COL.CIPHER_TEXT).setValue(cipherText);
+      sheet.getRange(rowIndex, COL.UPDATED_AT).setValue(now);
+    } else {
+      sheet.appendRow([ownerHash, cipherText, SCHEMA_VERSION, now, now]);
     }
 
-    // 新しい行を追加する（id未発見、または既存行が閲覧済みだったため新規発行）。
-    // 同じownerHashの「未閲覧」の古い行があれば、その行をそのまま新しい
-    // 内容で上書きする（＝1回のsetValuesで完結。deleteRow+appendRowより
-    // 大幅に軽い）。無ければ新規行として追加する。未閲覧の行は常に
-    // 最大1つになる。
-    var newId = rowIndex ? Utilities.getUuid() : id;
-    var newRow = [
-      newId, cipherText, '', ownerHash, '', 'active', SCHEMA_VERSION,
-      now, now, '', '', 0
-    ];
-    upsertUnviewedRow(sheet, ownerHash, newRow);
-    return jsonResponse({ ok: true, id: newId });
+    return jsonResponse({ ok: true, updatedAt: now.toISOString() });
   } finally {
     lock.releaseLock();
   }
 }
-
-/* 同じ ownerHash の既存行のうち、まだ誰にも開かれていない
-   （VIEWER_HASH が空の）行があれば、その行をそのまま上書きする。
-   該当行が無ければ新規行として追加する。
-   すでに誰かが開いた行は履歴として残すため対象にしない。
-   ※通常運用では該当行は0または1件のみのはず（複数残る場合は最初の
-     1件だけを上書きし、残りは履歴として残る）。 */
-function upsertUnviewedRow(sheet, ownerHash, rowValues) {
-  var lastRow = sheet.getLastRow();
-  var targetRow = null;
-  if (lastRow >= DATA_START_ROW) {
-    var values = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, COL.VIEWER_HASH).getValues();
-    for (var i = 0; i < values.length; i++) {
-      var rowOwnerHash  = values[i][COL.OWNER_HASH - 1];
-      var rowViewerHash = values[i][COL.VIEWER_HASH - 1];
-      if (rowOwnerHash === ownerHash && !rowViewerHash) {
-        targetRow = DATA_START_ROW + i;
-        break;
-      }
-    }
-  }
-  if (targetRow) {
-    sheet.getRange(targetRow, 1, 1, rowValues.length).setValues([rowValues]);
-  } else {
-    sheet.appendRow(rowValues);
-  }
-}
-
 
 /* ------------------------------------------------------------
-   閲覧（共有リンクを開いたとき）
+   ペア情報の取得（自分のデータ・お相手のデータ・ペア鍵材料）
    アクセス制御:
-   ・本人（ownerHash と一致） → 常に許可
-   ・viewerHash が未登録      → この人を初回閲覧者として登録し許可
-   ・viewerHash が登録済み    → 一致すれば許可、不一致なら拒否
+   ・現在、真剣交際中のパートナーがいない場合は拒否
+     （reason: 'no_partner' または 'partner_ended'）。
+   ・真剣交際中の場合のみ、自分の行とお相手（partnerHash）の行を
+     返す。どちらも「行が存在しない＝まだ送信していない」として
+     null を返す。
    ------------------------------------------------------------ */
-function handleView(id, viewerHash) {
-  if (!id) return jsonResponse({ ok: false, reason: 'invalid_params' });
-  if (!viewerHash) return jsonResponse({ ok: false, reason: 'login_required' });
+function handleFetchPair(ownerHash) {
+  if (!ownerHash) return jsonResponse({ ok: false, reason: 'invalid_params' });
 
-  var lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    var sheet = getSheet();
-    var rowIndex = findRowById(sheet, id);
-    if (!rowIndex) return jsonResponse({ ok: false, reason: 'not_found' });
-
-    var row = sheet.getRange(rowIndex, 1, 1, COL.VIEW_COUNT).getValues()[0];
-    var cipherText         = row[COL.CIPHER_TEXT - 1];
-    var ownerHash           = row[COL.OWNER_HASH - 1];
-    var existingViewerHash  = row[COL.VIEWER_HASH - 1];
-    var status              = row[COL.STATUS - 1];
-
-    if (status !== 'active') {
-      return jsonResponse({ ok: false, reason: status === 'active' ? 'not_found' : status });
-    }
-
-    var now = new Date();
-    var allowed = false;
-    var partnerInfo = getPartnerStatus(ownerHash);
-
-    if (viewerHash === ownerHash) {
-      allowed = true;
-    } else if (partnerInfo.active) {
-      allowed = (viewerHash === partnerInfo.partnerHash);
-    } else if (partnerInfo.everPartnered) {
-      allowed = false;
-    } else if (!existingViewerHash) {
-      allowed = true;
-      sheet.getRange(rowIndex, COL.VIEWER_HASH).setValue(viewerHash);
-      sheet.getRange(rowIndex, COL.FIRST_VIEWED_AT).setValue(now);
-    } else if (existingViewerHash === viewerHash) {
-      allowed = true;
-    } else {
-      allowed = false;
-    }
-
-    if (!allowed) {
-      return jsonResponse({ ok: false, reason: (partnerInfo.active || partnerInfo.everPartnered) ? 'partner_locked' : 'forbidden' });
-    }
-
-    sheet.getRange(rowIndex, COL.LAST_VIEWED_AT).setValue(now);
-    var viewCountCell = sheet.getRange(rowIndex, COL.VIEW_COUNT);
-    viewCountCell.setValue((Number(viewCountCell.getValue()) || 0) + 1);
-
-    return jsonResponse({ ok: true, cipherText: cipherText });
-  } finally {
-    lock.releaseLock();
+  var partnerInfo = getPartnerStatus(ownerHash);
+  if (!partnerInfo.ok) {
+    return jsonResponse({ ok: false, reason: 'server_error' });
   }
-}
-
-/* id (A列) からデータ行番号を探す。見つからなければ null */
-function findRowById(sheet, id) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return null;
-  var ids = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 1).getValues();
-  for (var i = 0; i < ids.length; i++) {
-    if (ids[i][0] === id) return DATA_START_ROW + i;
+  if (!partnerInfo.active) {
+    return jsonResponse({ ok: false, reason: partnerInfo.everPartnered ? 'partner_ended' : 'no_partner' });
   }
-  return null;
+  if (!partnerInfo.pairKey) {
+    // Partners APIがpairKeyを返していない（未対応）場合はサーバーエラー扱い
+    return jsonResponse({ ok: false, reason: 'server_error' });
+  }
+
+  var sheet = getSheet();
+  var ownRow     = readRow(sheet, findRowByOwnerHash(sheet, ownerHash));
+  var partnerRow = readRow(sheet, findRowByOwnerHash(sheet, partnerInfo.partnerHash));
+
+  return jsonResponse({
+    ok: true,
+    pairKey: partnerInfo.pairKey,
+    partnerDisplayName: partnerInfo.partnerDisplayName || '',
+    own: ownRow ? { cipherText: ownRow.cipherText, updatedAt: ownRow.updatedAt } : null,
+    partner: partnerRow ? { cipherText: partnerRow.cipherText, updatedAt: partnerRow.updatedAt } : null
+  });
 }
