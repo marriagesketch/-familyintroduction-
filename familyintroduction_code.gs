@@ -1,6 +1,7 @@
 /* ============================================================
    家族紹介 – GAS バックエンド (Code.gs)
-   スプレッドシートID: 18EsNFzS77rYcL1jGiGJ-JtOCCcyDGO1dVh9FSCUJjg4
+https://docs.google.com/spreadsheets/d/1CVGJeRNZJucJPcjYpCSj8OiaiF7ydAc2KSGryMyws1g/edit?usp=sharing
+   スプレッドシートID: 1CVGJeRNZJucJPcjYpCSj8OiaiF7ydAc2KSGryMyws1g
    ------------------------------------------------------------
    ・シート「Shares」のみ作成（Analyticsシートは作成しない）
    ------------------------------------------------------------
@@ -37,7 +38,7 @@
       GAS_ENDPOINT に設定済み）。
    ============================================================ */
 
-var SPREADSHEET_ID = '18EsNFzS77rYcL1jGiGJ-JtOCCcyDGO1dVh9FSCUJjg4';
+var SPREADSHEET_ID = '1CVGJeRNZJucJPcjYpCSj8OiaiF7ydAc2KSGryMyws1g';
 var SHEET_NAME      = 'Shares';
 var SCHEMA_VERSION  = 1;
 
