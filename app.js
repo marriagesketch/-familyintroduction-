@@ -20,11 +20,7 @@
    ============================================================ */
 
 const LIFF_ID = "2010312230-xbdc57CY";
-
-/* ▼▼▼ 家族紹介用に新しくデプロイしたGAS Web AppのURLをここに設定してください ▼▼▼ */
-const GAS_ENDPOINT = "ここに家族紹介用GASのデプロイURLを設定してください";
-
-/* ▼▼▼ パートナー登録（真剣交際パートナー機能）のLIFF URL ▼▼▼ */
+const GAS_ENDPOINT = "https://script.google.com/macros/s/AKfycbww9qhQApBg195WShW_osB4QhhbxknyxX1tR2MRbUKH5AR4Ygd3IMK1yY3SVgWYrxlKdA/exec";
 const PARTNER_REGISTRATION_URL = "https://liff.line.me/2010312230-xUsYz0UB";
 
 const STORAGE_KEY = "family_intro_draft_v1";
